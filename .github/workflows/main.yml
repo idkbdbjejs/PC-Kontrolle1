@@ -25,6 +25,8 @@ jobs:
       - name: Projekt-ZIP finden
         shell: bash
         run: |
+          set -e
+
           ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
@@ -32,28 +34,88 @@ jobs:
             exit 1
           fi
 
-          echo "Gefundene ZIP: $ZIP_FILE"
+          echo "ZIP gefunden: $ZIP_FILE"
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
       - name: Projekt entpacken
         shell: bash
         run: |
+          set -e
+
+          rm -rf "$GITHUB_WORKSPACE/android-project"
           mkdir -p "$GITHUB_WORKSPACE/android-project"
+
           unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/android-project"
 
       - name: Android-Projekt finden
         shell: bash
         run: |
-          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/android-project" -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -print -quit | xargs -r dirname)
+          set -e
+
+          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/android-project" \
+            -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -print -quit | xargs -r dirname)
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "FEHLER: Kein Android-Projekt gefunden."
-            find "$GITHUB_WORKSPACE/android-project" -maxdepth 5 -type f | head -100
+            find "$GITHUB_WORKSPACE/android-project" -maxdepth 6 -type f | head -100
             exit 1
           fi
 
-          echo "Android-Projekt gefunden: $PROJECT_DIR"
+          echo "Android-Projekt: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Java und Kotlin auf JVM 17 korrigieren
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          import pathlib
+          import re
+
+          root = pathlib.Path("${{ env.PROJECT_DIR }}")
+
+          files = list(root.rglob("*.gradle.kts")) + list(root.rglob("*.gradle"))
+
+          print("Build-Dateien gefunden:")
+          for p in files:
+              print(" -", p)
+
+              text = p.read_text(encoding="utf-8")
+
+              replacements = [
+                  ("JavaVersion.VERSION_1_8", "JavaVersion.VERSION_17"),
+                  ("JavaVersion.VERSION_8", "JavaVersion.VERSION_17"),
+                  ('sourceCompatibility = "1.8"', 'sourceCompatibility = JavaVersion.VERSION_17'),
+                  ("sourceCompatibility = '1.8'", "sourceCompatibility = JavaVersion.VERSION_17"),
+                  ('targetCompatibility = "1.8"', 'targetCompatibility = JavaVersion.VERSION_17'),
+                  ("targetCompatibility = '1.8'", "targetCompatibility = JavaVersion.VERSION_17"),
+                  ('jvmTarget = "1.8"', 'jvmTarget = "17"'),
+                  ("jvmTarget = '1.8'", 'jvmTarget = "17"'),
+                  ("JvmTarget.JVM_1_8", "JvmTarget.JVM_17"),
+              ]
+
+              for old, new in replacements:
+                  text = text.replace(old, new)
+
+              p.write_text(text, encoding="utf-8")
+
+          print("Java/Kotlin-JVM-Ziele korrigiert.")
+
+          props = root / "gradle.properties"
+
+          existing = ""
+          if props.exists():
+              existing = props.read_text(encoding="utf-8")
+
+          if "kotlin.jvm.target.validation.mode" not in existing:
+              existing += "\nkotlin.jvm.target.validation.mode=warning\n"
+
+          props.write_text(existing, encoding="utf-8")
+
+          print("gradle.properties angepasst.")
+          PY
 
       - name: Gradle einrichten
         uses: gradle/actions/setup-gradle@v6
@@ -63,8 +125,12 @@ jobs:
       - name: APK bauen
         shell: bash
         run: |
+          set -e
+
           cd "$PROJECT_DIR"
-          gradle assembleDebug --no-daemon
+
+          echo "Baue Android APK..."
+          gradle assembleDebug --no-daemon --stacktrace
 
       - name: APK bereitstellen
         uses: actions/upload-artifact@v4
@@ -72,3 +138,10 @@ jobs:
           name: PC-Kontrolle-APK
           path: '**/build/outputs/apk/debug/*.apk'
           if-no-files-found: error
+
+      - name: Build erfolgreich
+        run: |
+          echo "===================================="
+          echo "APK ERFOLGREICH GEBAUT"
+          echo "Artifact: PC-Kontrolle-APK"
+          echo "===================================="
