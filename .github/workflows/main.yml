@@ -34,7 +34,9 @@ jobs:
             exit 1
           fi
 
-          echo "ZIP gefunden: $ZIP_FILE"
+          echo "Gefundene ZIP:"
+          echo "$ZIP_FILE"
+
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
       - name: Projekt entpacken
@@ -47,80 +49,98 @@ jobs:
 
           unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/android-project"
 
+          echo "Projekt entpackt."
+
       - name: Android-Projekt finden
         shell: bash
         run: |
           set -e
 
           PROJECT_DIR=$(find "$GITHUB_WORKSPACE/android-project" \
-            -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
             -print -quit | xargs -r dirname)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "FEHLER: Kein Android-Projekt gefunden."
-            find "$GITHUB_WORKSPACE/android-project" -maxdepth 6 -type f | head -100
+            echo "FEHLER: Kein Android-Gradle-Projekt gefunden."
+            echo ""
+            echo "Gefundene Dateien:"
+            find "$GITHUB_WORKSPACE/android-project" -maxdepth 6 -type f | head -150
             exit 1
           fi
 
-          echo "Android-Projekt: $PROJECT_DIR"
+          echo "Android-Projekt gefunden:"
+          echo "$PROJECT_DIR"
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-      - name: Java und Kotlin auf JVM 17 korrigieren
-        shell: bash
-        run: |
-          set -e
-
-          python3 - <<'PY'
-          import pathlib
-          import re
-
-          root = pathlib.Path("${{ env.PROJECT_DIR }}")
-
-          files = list(root.rglob("*.gradle.kts")) + list(root.rglob("*.gradle"))
-
-          print("Build-Dateien gefunden:")
-          for p in files:
-              print(" -", p)
-
-              text = p.read_text(encoding="utf-8")
-
-              replacements = [
-                  ("JavaVersion.VERSION_1_8", "JavaVersion.VERSION_17"),
-                  ("JavaVersion.VERSION_8", "JavaVersion.VERSION_17"),
-                  ('sourceCompatibility = "1.8"', 'sourceCompatibility = JavaVersion.VERSION_17'),
-                  ("sourceCompatibility = '1.8'", "sourceCompatibility = JavaVersion.VERSION_17"),
-                  ('targetCompatibility = "1.8"', 'targetCompatibility = JavaVersion.VERSION_17'),
-                  ("targetCompatibility = '1.8'", "targetCompatibility = JavaVersion.VERSION_17"),
-                  ('jvmTarget = "1.8"', 'jvmTarget = "17"'),
-                  ("jvmTarget = '1.8'", 'jvmTarget = "17"'),
-                  ("JvmTarget.JVM_1_8", "JvmTarget.JVM_17"),
-              ]
-
-              for old, new in replacements:
-                  text = text.replace(old, new)
-
-              p.write_text(text, encoding="utf-8")
-
-          print("Java/Kotlin-JVM-Ziele korrigiert.")
-
-          props = root / "gradle.properties"
-
-          existing = ""
-          if props.exists():
-              existing = props.read_text(encoding="utf-8")
-
-          if "kotlin.jvm.target.validation.mode" not in existing:
-              existing += "\nkotlin.jvm.target.validation.mode=warning\n"
-
-          props.write_text(existing, encoding="utf-8")
-
-          print("gradle.properties angepasst.")
-          PY
 
       - name: Gradle einrichten
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.11.1'
+
+      - name: JVM-Ziele auf Java 17 setzen
+        shell: bash
+        run: |
+          set -e
+
+          cat > "$GITHUB_WORKSPACE/force-java17.gradle" <<'EOF'
+          import org.gradle.api.tasks.compile.JavaCompile
+
+          allprojects {
+              tasks.configureEach { task ->
+
+                  if (task instanceof JavaCompile) {
+                      task.options.release = 17
+                  }
+
+                  if (task.class.name.contains("KotlinCompile")) {
+                      try {
+                          task.kotlinOptions.jvmTarget = "17"
+                      } catch (Exception ignored) {
+                          println("Kotlin-JVM-Target konnte nicht direkt gesetzt werden: " + task.path)
+                      }
+                  }
+              }
+          }
+
+          gradle.projectsEvaluated {
+              allprojects {
+                  tasks.configureEach { task ->
+
+                      if (task instanceof JavaCompile) {
+                          task.options.release = 17
+                      }
+
+                      if (task.class.name.contains("KotlinCompile")) {
+                          try {
+                              task.kotlinOptions.jvmTarget = "17"
+                          } catch (Exception ignored) {
+                              println("Kotlin-JVM-Target konnte nach Projektkonfiguration nicht gesetzt werden: " + task.path)
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          echo "Java/Kotlin JVM-Konfiguration erstellt."
+
+      - name: Gradle-Dateien prüfen
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "=== Projektdateien ==="
+          ls -la
+
+          echo ""
+          echo "=== Gradle-Dateien ==="
+          find . -maxdepth 3 -type f \
+            \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -print
 
       - name: APK bauen
         shell: bash
@@ -129,19 +149,54 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          echo "Baue Android APK..."
-          gradle assembleDebug --no-daemon --stacktrace
+          echo "================================"
+          echo "PC-Kontrolle APK wird gebaut"
+          echo "Java: 17"
+          echo "Kotlin JVM Target: 17"
+          echo "================================"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              --init-script "$GITHUB_WORKSPACE/force-java17.gradle"
+          else
+            gradle assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              --init-script "$GITHUB_WORKSPACE/force-java17.gradle"
+          fi
+
+      - name: APK suchen
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== APK-Dateien ==="
+
+          find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            -print
+
+          APK_COUNT=$(find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "FEHLER: Keine APK gefunden."
+            exit 1
+          fi
+
+          echo ""
+          echo "APK erfolgreich erzeugt."
 
       - name: APK bereitstellen
         uses: actions/upload-artifact@v4
         with:
           name: PC-Kontrolle-APK
-          path: '**/build/outputs/apk/debug/*.apk'
+          path: |
+            **/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-
-      - name: Build erfolgreich
-        run: |
-          echo "===================================="
-          echo "APK ERFOLGREICH GEBAUT"
-          echo "Artifact: PC-Kontrolle-APK"
-          echo "===================================="
