@@ -25,8 +25,6 @@ jobs:
       - name: Projekt-ZIP finden
         shell: bash
         run: |
-          set -e
-
           ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
@@ -42,156 +40,150 @@ jobs:
       - name: Projekt entpacken
         shell: bash
         run: |
-          set -e
-
           rm -rf "$GITHUB_WORKSPACE/android-project"
           mkdir -p "$GITHUB_WORKSPACE/android-project"
 
-          unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/android-project"
+          unzip -q "$ZIP_FILE" \
+            -d "$GITHUB_WORKSPACE/android-project"
 
-          echo "Projekt entpackt."
+          echo "Projekt wurde entpackt."
 
       - name: Android-Projekt finden
         shell: bash
         run: |
-          set -e
-
           PROJECT_DIR=$(find "$GITHUB_WORKSPACE/android-project" \
             -type f \
             \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
             -print -quit | xargs -r dirname)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "FEHLER: Kein Android-Gradle-Projekt gefunden."
-            echo ""
+            echo "FEHLER: Kein Android-Projekt gefunden."
+
             echo "Gefundene Dateien:"
-            find "$GITHUB_WORKSPACE/android-project" -maxdepth 6 -type f | head -150
+            find "$GITHUB_WORKSPACE/android-project" \
+              -maxdepth 6 \
+              -type f | head -200
+
             exit 1
           fi
 
-          echo "Android-Projekt gefunden:"
+          echo "Android-Projekt:"
           echo "$PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
+      - name: Java-Einstellungen reparieren
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+
+          project = os.environ["PROJECT_DIR"]
+
+          gradle_files = []
+
+          for root, dirs, files in os.walk(project):
+              for file in files:
+                  if file in ("build.gradle", "build.gradle.kts"):
+                      gradle_files.append(os.path.join(root, file))
+
+          print("Gefundene Gradle-Dateien:")
+          for f in gradle_files:
+              print(f)
+
+          for path in gradle_files:
+              with open(path, "r", encoding="utf-8") as f:
+                  content = f.read()
+
+              original = content
+
+              # Entfernt Java --release Einstellungen,
+              # die vom Android Gradle Plugin nicht unterstützt werden.
+              content = re.sub(
+                  r'^[ \t]*options\.release\s*=\s*[^\n]*\n?',
+                  '',
+                  content,
+                  flags=re.MULTILINE
+              )
+
+              content = re.sub(
+                  r'^[ \t]*options\.release\.set\([^)]*\)\s*\n?',
+                  '',
+                  content,
+                  flags=re.MULTILINE
+              )
+
+              # Android compileOptions ergänzen,
+              # falls das Projekt noch keine besitzt.
+              if re.search(r'\bcompileOptions\s*\{', content) is None:
+                  android_match = re.search(
+                      r'(\bandroid\s*\{)',
+                      content
+                  )
+
+                  if android_match:
+                      insert_at = android_match.end()
+
+                      compile_options = """
+
+                  compileOptions {
+                      sourceCompatibility JavaVersion.VERSION_17
+                      targetCompatibility JavaVersion.VERSION_17
+                  }
+              """
+
+                      content = (
+                          content[:insert_at]
+                          + compile_options
+                          + content[insert_at:]
+                      )
+
+              if content != original:
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(content)
+
+                  print("Repariert:", path)
+              else:
+                  print("Keine Änderung nötig:", path)
+
+          PY
+
       - name: Gradle einrichten
         uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: '8.11.1'
 
-      - name: JVM-Ziele auf Java 17 setzen
+      - name: Gradle-Version prüfen
         shell: bash
         run: |
-          set -e
-
-          cat > "$GITHUB_WORKSPACE/force-java17.gradle" <<'EOF'
-          import org.gradle.api.tasks.compile.JavaCompile
-
-          allprojects {
-              tasks.configureEach { task ->
-
-                  if (task instanceof JavaCompile) {
-                      task.options.release = 17
-                  }
-
-                  if (task.class.name.contains("KotlinCompile")) {
-                      try {
-                          task.kotlinOptions.jvmTarget = "17"
-                      } catch (Exception ignored) {
-                          println("Kotlin-JVM-Target konnte nicht direkt gesetzt werden: " + task.path)
-                      }
-                  }
-              }
-          }
-
-          gradle.projectsEvaluated {
-              allprojects {
-                  tasks.configureEach { task ->
-
-                      if (task instanceof JavaCompile) {
-                          task.options.release = 17
-                      }
-
-                      if (task.class.name.contains("KotlinCompile")) {
-                          try {
-                              task.kotlinOptions.jvmTarget = "17"
-                          } catch (Exception ignored) {
-                              println("Kotlin-JVM-Target konnte nach Projektkonfiguration nicht gesetzt werden: " + task.path)
-                          }
-                      }
-                  }
-              }
-          }
-          EOF
-
-          echo "Java/Kotlin JVM-Konfiguration erstellt."
-
-      - name: Gradle-Dateien prüfen
-        shell: bash
-        run: |
-          set -e
-
           cd "$PROJECT_DIR"
 
-          echo "=== Projektdateien ==="
-          ls -la
-
-          echo ""
-          echo "=== Gradle-Dateien ==="
-          find . -maxdepth 3 -type f \
-            \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) \
-            -print
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew --version
+          else
+            gradle --version
+          fi
 
       - name: APK bauen
         shell: bash
         run: |
-          set -e
-
           cd "$PROJECT_DIR"
-
-          echo "================================"
-          echo "PC-Kontrolle APK wird gebaut"
-          echo "Java: 17"
-          echo "Kotlin JVM Target: 17"
-          echo "================================"
 
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
-            ./gradlew assembleDebug \
-              --no-daemon \
-              --stacktrace \
-              --init-script "$GITHUB_WORKSPACE/force-java17.gradle"
+            ./gradlew assembleDebug --no-daemon
           else
-            gradle assembleDebug \
-              --no-daemon \
-              --stacktrace \
-              --init-script "$GITHUB_WORKSPACE/force-java17.gradle"
+            gradle assembleDebug --no-daemon
           fi
 
       - name: APK suchen
         shell: bash
         run: |
-          set -e
-
-          echo "=== APK-Dateien ==="
-
+          echo "Gebautes APK:"
           find "$PROJECT_DIR" \
             -type f \
             -path "*/build/outputs/apk/debug/*.apk" \
             -print
-
-          APK_COUNT=$(find "$PROJECT_DIR" \
-            -type f \
-            -path "*/build/outputs/apk/debug/*.apk" \
-            | wc -l)
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "FEHLER: Keine APK gefunden."
-            exit 1
-          fi
-
-          echo ""
-          echo "APK erfolgreich erzeugt."
 
       - name: APK bereitstellen
         uses: actions/upload-artifact@v4
