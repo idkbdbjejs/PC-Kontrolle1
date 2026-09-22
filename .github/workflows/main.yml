@@ -22,170 +22,213 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
 
-      - name: Projekt-ZIP finden
+      - name: ZIP finden
         shell: bash
         run: |
-          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+          set -e
+
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
+            -maxdepth 1 \
+            -type f \
+            -iname "*.zip" \
+            -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "FEHLER: Keine Projekt-ZIP gefunden."
+            echo "FEHLER: Keine ZIP-Datei gefunden."
             exit 1
           fi
 
-          echo "Gefundene ZIP:"
-          echo "$ZIP_FILE"
-
+          echo "ZIP: $ZIP_FILE"
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-      - name: Projekt entpacken
+      - name: Android-Projekt entpacken
         shell: bash
         run: |
+          set -e
+
           rm -rf "$GITHUB_WORKSPACE/android-project"
+
           mkdir -p "$GITHUB_WORKSPACE/android-project"
 
           unzip -q "$ZIP_FILE" \
             -d "$GITHUB_WORKSPACE/android-project"
 
-          echo "Projekt wurde entpackt."
-
       - name: Android-Projekt finden
         shell: bash
         run: |
-          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/android-project" \
+          set -e
+
+          PROJECT_DIR=$(find \
+            "$GITHUB_WORKSPACE/android-project" \
             -type f \
             \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
             -print -quit | xargs -r dirname)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "FEHLER: Kein Android-Projekt gefunden."
-
-            echo "Gefundene Dateien:"
-            find "$GITHUB_WORKSPACE/android-project" \
-              -maxdepth 6 \
-              -type f | head -200
-
+            echo "FEHLER: Android-Projekt nicht gefunden."
             exit 1
           fi
 
-          echo "Android-Projekt:"
+          echo "Projekt:"
           echo "$PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Java-Einstellungen reparieren
+      - name: Android Gradle Dateien reparieren
         shell: bash
         run: |
-          python3 <<'PY'
-          import os
+          set -e
+
+          APP_GRADLE="$PROJECT_DIR/app/build.gradle.kts"
+
+          if [ ! -f "$APP_GRADLE" ]; then
+            echo "FEHLER: $APP_GRADLE nicht gefunden."
+            exit 1
+          fi
+
+          echo "Repariere:"
+          echo "$APP_GRADLE"
+
+          python3 - "$APP_GRADLE" <<'PY'
+          import sys
           import re
 
-          project = os.environ["PROJECT_DIR"]
+          path = sys.argv[1]
 
-          gradle_files = []
+          with open(path, "r", encoding="utf-8") as f:
+              text = f.read()
 
-          for root, dirs, files in os.walk(project):
-              for file in files:
-                  if file in ("build.gradle", "build.gradle.kts"):
-                      gradle_files.append(os.path.join(root, file))
+          # Falsche Groovy-Syntax entfernen.
+          text = re.sub(
+              r'(?m)^[ \t]*sourceCompatibility\s+JavaVersion\.VERSION_17\s*$',
+              '',
+              text
+          )
 
-          print("Gefundene Gradle-Dateien:")
-          for f in gradle_files:
-              print(f)
+          text = re.sub(
+              r'(?m)^[ \t]*targetCompatibility\s+JavaVersion\.VERSION_17\s*$',
+              '',
+              text
+          )
 
-          for path in gradle_files:
-              with open(path, "r", encoding="utf-8") as f:
-                  content = f.read()
+          # Falsche --release Einstellungen entfernen.
+          text = re.sub(
+              r'(?m)^[ \t]*options\.release\s*=\s*.*$',
+              '',
+              text
+          )
 
-              original = content
+          text = re.sub(
+              r'(?m)^[ \t]*options\.release\.set\(.*\)\s*$',
+              '',
+              text
+          )
 
-              # Entfernt Java --release Einstellungen,
-              # die vom Android Gradle Plugin nicht unterstützt werden.
-              content = re.sub(
-                  r'^[ \t]*options\.release\s*=\s*[^\n]*\n?',
-                  '',
-                  content,
-                  flags=re.MULTILINE
+          # Vorhandene compileOptions entfernen,
+          # damit wir genau eine saubere Version einsetzen.
+          text = re.sub(
+              r'(?s)\s*compileOptions\s*\{.*?\n\s*\}',
+              '',
+              text,
+              count=1
+          )
+
+          # Saubere Kotlin-DSL-Version.
+          block = """
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          """
+
+          android_match = re.search(
+              r'(\bandroid\s*\{)',
+              text
+          )
+
+          if not android_match:
+              raise SystemExit(
+                  "FEHLER: Kein android { ... } Block gefunden."
               )
 
-              content = re.sub(
-                  r'^[ \t]*options\.release\.set\([^)]*\)\s*\n?',
-                  '',
-                  content,
-                  flags=re.MULTILINE
-              )
+          position = android_match.end()
 
-              # Android compileOptions ergänzen,
-              # falls das Projekt noch keine besitzt.
-              if re.search(r'\bcompileOptions\s*\{', content) is None:
-                  android_match = re.search(
-                      r'(\bandroid\s*\{)',
-                      content
-                  )
+          text = (
+              text[:position]
+              + block
+              + text[position:]
+          )
 
-                  if android_match:
-                      insert_at = android_match.end()
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(text)
 
-                      compile_options = """
-
-                  compileOptions {
-                      sourceCompatibility JavaVersion.VERSION_17
-                      targetCompatibility JavaVersion.VERSION_17
-                  }
-              """
-
-                      content = (
-                          content[:insert_at]
-                          + compile_options
-                          + content[insert_at:]
-                      )
-
-              if content != original:
-                  with open(path, "w", encoding="utf-8") as f:
-                      f.write(content)
-
-                  print("Repariert:", path)
-              else:
-                  print("Keine Änderung nötig:", path)
-
+          print("build.gradle.kts wurde repariert.")
           PY
 
-      - name: Gradle einrichten
-        uses: gradle/actions/setup-gradle@v6
+          echo ""
+          echo "===== REPARIERTE build.gradle.kts ====="
+          cat "$APP_GRADLE"
+          echo "========================================"
 
-      - name: Gradle-Version prüfen
+      - name: Gradle 8.11.1 installieren
         shell: bash
         run: |
-          cd "$PROJECT_DIR"
+          set -e
 
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            ./gradlew --version
-          else
-            gradle --version
-          fi
+          mkdir -p "$RUNNER_TEMP/gradle"
+
+          curl -L \
+            -o "$RUNNER_TEMP/gradle/gradle.zip" \
+            https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+
+          unzip -q \
+            "$RUNNER_TEMP/gradle/gradle.zip" \
+            -d "$RUNNER_TEMP/gradle"
+
+          echo "$RUNNER_TEMP/gradle/gradle-8.11.1/bin" >> "$GITHUB_PATH"
+
+      - name: Gradle Version prüfen
+        shell: bash
+        run: |
+          gradle --version
 
       - name: APK bauen
         shell: bash
         run: |
+          set -e
+
           cd "$PROJECT_DIR"
 
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            ./gradlew assembleDebug --no-daemon
-          else
-            gradle assembleDebug --no-daemon
-          fi
+          gradle assembleDebug \
+            --no-daemon \
+            --stacktrace
 
       - name: APK suchen
         shell: bash
         run: |
-          echo "Gebautes APK:"
+          set -e
+
+          echo "Gefundene APK-Dateien:"
+
           find "$PROJECT_DIR" \
             -type f \
             -path "*/build/outputs/apk/debug/*.apk" \
             -print
 
-      - name: APK bereitstellen
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            -print -quit)
+
+          if [ -z "$APK" ]; then
+            echo "FEHLER: APK wurde nicht erzeugt."
+            exit 1
+          fi
+
+          echo "APK ERFOLGREICH ERZEUGT:"
+          echo "$APK"
+
+      - name: APK als Download bereitstellen
         uses: actions/upload-artifact@v4
         with:
           name: PC-Kontrolle-APK
