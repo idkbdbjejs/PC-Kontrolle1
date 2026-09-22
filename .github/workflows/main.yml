@@ -17,20 +17,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK einrichten
-        uses: android-actions/setup-android@v3
-
-      - name: Android SDK Komponenten installieren
+      - name: Android SDK vorbereiten
         run: |
+          yes | sdkmanager --licenses || true
           sdkmanager "platform-tools"
           sdkmanager "platforms;android-35"
           sdkmanager "build-tools;35.0.0"
 
-      - name: Projekt-ZIP finden und entpacken
+      - name: Projekt-ZIP finden
         run: |
-          mkdir -p android-project
-
-          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
             echo "FEHLER: Keine Projekt-ZIP gefunden."
@@ -38,32 +34,46 @@ jobs:
           fi
 
           echo "Gefundene ZIP: $ZIP_FILE"
-          unzip -q "$ZIP_FILE" -d android-project
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      - name: Projekt entpacken
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/android-project"
+          unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/android-project"
 
       - name: Android-Projekt finden
         run: |
-          PROJECT_DIR=$(find android-project -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -print -quit | xargs -r dirname)
+          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/android-project" \
+            -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -print -quit | xargs -r dirname)
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "FEHLER: Kein Android-Projekt gefunden."
-            find android-project -maxdepth 4 -type f
+            find "$GITHUB_WORKSPACE/android-project" -maxdepth 5 -type f
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Android-Projekt gefunden: $PROJECT_DIR"
 
-      - name: Gradle installieren
+      - name: Gradle herunterladen
         run: |
-          curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.9-bin.zip
-          unzip -q gradle.zip
+          curl -L -o "$GITHUB_WORKSPACE/gradle.zip" \
+            https://services.gradle.org/distributions/gradle-8.9-bin.zip
+
+          unzip -q "$GITHUB_WORKSPACE/gradle.zip" \
+            -d "$GITHUB_WORKSPACE"
 
       - name: APK bauen
         run: |
           cd "$PROJECT_DIR"
-          ../../gradle-8.9/bin/gradle assembleDebug --no-daemon
 
-      - name: APK als Download bereitstellen
+          "$GITHUB_WORKSPACE/gradle-8.9/bin/gradle" \
+            assembleDebug \
+            --no-daemon
+
+      - name: APK bereitstellen
         uses: actions/upload-artifact@v4
         with:
           name: PC-Kontrolle-APK
